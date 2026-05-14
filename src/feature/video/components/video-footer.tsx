@@ -1,4 +1,4 @@
-import { useState, useCallback, useContext, useEffect } from 'react';
+import { useState, useCallback, useContext, useEffect, useRef } from 'react';
 import classNames from 'classnames';
 import { message, Modal, Form, Select, Checkbox, Tooltip } from 'antd';
 import { useSearchParams } from 'react-router';
@@ -37,6 +37,8 @@ import { LiveStreamButton, LiveStreamModal } from './live-stream';
 import { IconFont } from '../../../component/icon-font';
 import { VideoMaskModel } from './video-mask-modal';
 import { useParticipantsChange } from '../hooks/useParticipantsChange';
+import { tsvb } from 'effects-sdk';
+import appPackageJson from '../../../../package.json';
 interface VideoFooterProps {
   className?: string;
   selfShareCanvas?: HTMLCanvasElement | HTMLVideoElement | null;
@@ -44,10 +46,18 @@ interface VideoFooterProps {
 }
 
 const isAudioEnable = typeof AudioWorklet === 'function';
+const processorBaseUrl = `${location.origin}/processors`;
+const effectsSdkVersion = appPackageJson.dependencies['effects-sdk'].replace(/^[^\d]*/, '');
+type EffectsSdkInstance = InstanceType<typeof tsvb>;
+
 const VideoFooter = (props: VideoFooterProps) => {
   const { className, selfShareCanvas, sharing } = props;
   const zmClient = useContext(ZoomContext);
   const { mediaStream } = useContext(ZoomMediaContext);
+  const effectsSDKRef = useRef<EffectsSdkInstance | null>(null);
+  const effectsChannelRef = useRef<MessageChannel | null>(null);
+  const effectsLowerThirdRef = useRef<any>(null);
+  const effectsSessionRef = useRef(0);
   const liveTranscriptionClient = zmClient.getLiveTranscriptionClient();
   const liveStreamClient = zmClient.getLiveStreamClient();
   const broadcastStreamClient = zmClient.getBroadcastStreamingClient();
@@ -75,6 +85,7 @@ const VideoFooter = (props: VideoFooterProps) => {
   const [caption, setCaption] = useState({ text: '', isOver: false, displayName: '' });
   const [activePlaybackUrl, setActivePlaybackUrl] = useState('');
   const [activeVideoProcessor, setActiveVideoProcessor] = useState<Processor | undefined>();
+  const [activeEffectType, setActiveEffectType] = useState<string | undefined>();
   const [activeAudioProcessorList, setActiveAudioProcessorList] = useState<Processor[]>([]);
   const [isMicrophoneForbidden, setIsMicrophoneForbidden] = useState(false);
   const [createdProcessorList, setCreatedProcessorList] = useState<Processor[]>([]);
@@ -98,19 +109,19 @@ const VideoFooter = (props: VideoFooterProps) => {
   const [searchParams] = useSearchParams();
   const audioProcessorList: Array<ProcessorParams> = [
     {
-      url: `${location.origin}/static/processors/bypass-audio-processor.js`,
+      url: `${processorBaseUrl}/bypass-audio-processor.js`,
       type: 'audio',
       name: 'bypass-audio-processor',
       options: {}
     },
     {
-      url: `${location.origin}/static/processors/white-noise-audio-processor.js`,
+      url: `${processorBaseUrl}/white-noise-audio-processor.js`,
       type: 'audio',
       name: 'white-noise-audio-processor',
       options: {}
     },
     {
-      url: `${location.origin}/static/processors/pitch-shift-audio-processor.js`,
+      url: `${processorBaseUrl}/pitch-shift-audio-processor.js`,
       type: 'audio',
       name: 'pitch-shift-audio-processor',
       options: {}
@@ -501,41 +512,269 @@ const VideoFooter = (props: VideoFooterProps) => {
       });
     };
   }, []);
+
+  const destroyLowerThird = useCallback(() => {
+    try {
+      effectsLowerThirdRef.current?.hide?.();
+      effectsLowerThirdRef.current?.destroy?.();
+    } catch (error) {
+      console.warn('Failed to destroy lower third component:', error);
+    } finally {
+      effectsLowerThirdRef.current = null;
+    }
+  }, []);
+
+  const destroyEffectsSdk = useCallback(
+    async (processor?: Processor) => {
+      effectsSessionRef.current += 1;
+      processor?.port.postMessage({ cmd: 'stop' });
+      processor?.port.postMessage({ cmd: 'reset' });
+
+      const channel = effectsChannelRef.current;
+      effectsChannelRef.current = null;
+      channel?.port1.close();
+      channel?.port2.close();
+
+      destroyLowerThird();
+
+      const sdk = effectsSDKRef.current;
+      effectsSDKRef.current = null;
+      if (sdk) {
+        try {
+          sdk.stop?.();
+        } catch (error) {
+          console.warn('Failed to stop Effects SDK:', error);
+        }
+        try {
+          await sdk.destroy?.();
+        } catch (error) {
+          console.warn('Failed to destroy Effects SDK:', error);
+        }
+      }
+    },
+    [destroyLowerThird]
+  );
+
+  const applyEffect = useCallback((sdk: EffectsSdkInstance, effectType: string) => {
+    sdk.clearBlur();
+    sdk.clearBackground();
+    sdk.disableBeautification();
+    destroyLowerThird();
+
+    switch (effectType) {
+      case 'esdk-blur':
+        sdk.setBlur(0.8);
+        console.log('Applying blur effect');
+        break;
+
+      case 'esdk-beautification':
+        sdk.enableBeautification();
+        sdk.setBeautificationLevel(1);
+        console.log('Applying beautification effect');
+        break;
+
+      case 'esdk-image':
+        sdk.setBackground('https://effectssdk.ai/sdk/100.jpg', { type: 'image/jpeg' });
+        console.log('Applying background image effect');
+        break;
+
+      case 'esdk-video':
+        sdk.setBackground('https://effectssdk.ai/sdk/video-background.mp4', { type: 'video/mp4' });
+        console.log('Applying background video effect');
+        break;
+
+      case 'esdk-lowerthird': {
+        const lowerThirdComponent = sdk.createComponent({
+          component: 'lowerthird_2',
+          options: {
+            text: {
+              title: 'Max Trosin',
+              subtitle: 'Effects SDK Team'
+            }
+          }
+        });
+
+        sdk.addComponent(lowerThirdComponent, 'lower_third');
+        lowerThirdComponent.show();
+        effectsLowerThirdRef.current = lowerThirdComponent;
+        console.log('Applying lower third effect');
+        break;
+      }
+
+      default:
+        console.warn('Unknown effect type:', effectType);
+    }
+  }, [destroyLowerThird]);
+
+  const updateEffect = useCallback((effectType: string) => {
+    const effectsSDK = effectsSDKRef.current;
+    if (!effectsSDK) {
+      console.warn('Effects SDK is not initialized');
+      return;
+    }
+
+    applyEffect(effectsSDK, effectType);
+    setActiveEffectType(effectType);
+  }, [applyEffect]);
+
+  const initializeEffectsSDK = useCallback(async (processor: Processor, effectType: string) => {
+    try {
+      await destroyEffectsSdk(processor);
+
+      const sdk = new tsvb('CUSTOMER_ID');
+      const sessionId = effectsSessionRef.current + 1;
+      effectsSessionRef.current = sessionId;
+
+      sdk.config({
+        preset: 'balanced',
+        provider: 'webgpu',
+        test_inference: true,
+        wasmPaths: {
+          'ort-wasm.wasm': `https://effectssdk.ai/sdk/web/${effectsSdkVersion}/ort-wasm.wasm`,
+          'ort-wasm-simd.wasm': `https://effectssdk.ai/sdk/web/${effectsSdkVersion}/ort-wasm-simd.wasm`
+        }
+      });
+      sdk.onError((error) => {
+        console.error('Effects SDK error:', error);
+      });
+
+      await sdk.initFrameProcessor();
+      if (sessionId !== effectsSessionRef.current) {
+        await sdk.destroy?.();
+        return false;
+      }
+
+      sdk.run();
+      effectsSDKRef.current = sdk;
+
+      const channel = new MessageChannel();
+      effectsChannelRef.current = channel;
+
+      processor.port.postMessage(
+        {
+          cmd: 'initialize',
+          port: channel.port1
+        },
+        [channel.port1]
+      );
+
+      channel.port2.start();
+      channel.port2.onmessage = async (e) => {
+        if (sessionId !== effectsSessionRef.current || e.data.cmd !== 'process_frame') {
+          e.data.frame?.close?.();
+          return;
+        }
+
+        const { frame, frameId } = e.data;
+
+        try {
+          const outputFrame = await sdk.processFrame(frame);
+          if (sessionId !== effectsSessionRef.current) {
+            outputFrame.close();
+            return;
+          }
+
+          channel.port2.postMessage(
+            {
+              cmd: 'processed_video_frame',
+              frame: outputFrame,
+              frameId
+            },
+            [outputFrame]
+          );
+        } catch (err) {
+          console.error('Frame processing failed:', err);
+          channel.port2.postMessage({
+            cmd: 'processed_video_frame',
+            frame: null,
+            frameId,
+            error: err instanceof Error ? err.message : String(err)
+          });
+        }
+      };
+
+      processor.port.postMessage({ cmd: 'start' });
+      applyEffect(sdk, effectType);
+      setActiveEffectType(effectType);
+
+      console.log('Effects SDK initialized with effect:', effectType);
+      return true;
+    } catch (error) {
+      console.error('Failed to initialize Effects SDK:', error);
+      await destroyEffectsSdk(processor);
+      return false;
+    }
+  }, [applyEffect, destroyEffectsSdk]);
+
   const onVideoProcessorClick = useCallback(async (processor: any) => {
+    if (
+      processor.name === 'effects-sdk-processor' &&
+      activeVideoProcessor?.name === 'effects-sdk-processor' &&
+      processor.effectType &&
+      processor.effectType !== activeEffectType
+    ) {
+      updateEffect(processor.effectType);
+      return;
+    }
+
     let tempProcessor = createdProcessorList?.find((p) => p.name === processor.name);
     if (!tempProcessor) {
       try {
         tempProcessor = await mediaStream?.createProcessor(processor);
-
-        setCreatedProcessorList([...createdProcessorList, tempProcessor as Processor]);
+        if (tempProcessor) {
+          setCreatedProcessorList((prev) =>
+            prev.some((item) => item.name === tempProcessor?.name) ? prev : [...prev, tempProcessor as Processor]
+          );
+        }
       } catch (e) {
         console.log(e);
-      }
-      if (activeVideoProcessor) {
-        if (processor.name === activeVideoProcessor?.name) {
-          mediaStream?.removeProcessor(activeVideoProcessor);
-          setActiveVideoProcessor(undefined);
-        } else {
-          mediaStream?.removeProcessor(activeVideoProcessor);
-          mediaStream?.addProcessor(tempProcessor as Processor);
-          if (tempProcessor?.name === 'watermark-processor') {
-            updateWatermarkImage(tempProcessor, `${location.origin}/zoom.svg`);
-          }
-          setActiveVideoProcessor(tempProcessor as Processor);
-        }
-      } else {
-        try {
-          await mediaStream?.addProcessor(tempProcessor as Processor);
-          setActiveVideoProcessor(tempProcessor as Processor);
-          if (tempProcessor?.name === 'watermark-processor') {
-            updateWatermarkImage(tempProcessor, `${location.origin}/zoom.svg`);
-          }
-        } catch (e) {
-          console.error(e);
-        }
+        return;
       }
     }
-  }, []);
+    if (!tempProcessor) {
+      return;
+    }
+
+    try {
+      if (activeVideoProcessor?.name === tempProcessor.name) {
+        await mediaStream?.removeProcessor(tempProcessor);
+        if (tempProcessor.name === 'effects-sdk-processor') {
+          await destroyEffectsSdk(tempProcessor);
+        }
+        setActiveVideoProcessor(undefined);
+        setActiveEffectType(undefined);
+        return;
+      }
+
+      if (activeVideoProcessor) {
+        await mediaStream?.removeProcessor(activeVideoProcessor);
+        if (activeVideoProcessor.name === 'effects-sdk-processor') {
+          await destroyEffectsSdk(activeVideoProcessor);
+        }
+        setActiveVideoProcessor(undefined);
+      }
+
+      await mediaStream?.addProcessor(tempProcessor);
+      if (tempProcessor.name === 'watermark-processor') {
+        updateWatermarkImage(tempProcessor, `${location.origin}/zoom.svg`);
+        setActiveEffectType(undefined);
+      } else if (tempProcessor.name === 'effects-sdk-processor') {
+        const effectType = processor.effectType || 'esdk-blur';
+        const initialized = await initializeEffectsSDK(tempProcessor, effectType);
+        if (!initialized) {
+          await mediaStream?.removeProcessor(tempProcessor);
+          setActiveEffectType(undefined);
+          return;
+        }
+      } else {
+        setActiveEffectType(undefined);
+      }
+
+      setActiveVideoProcessor(tempProcessor);
+    } catch (e) {
+      console.error(e);
+    }
+  }, [createdProcessorList, mediaStream, activeVideoProcessor, activeEffectType, destroyEffectsSdk, updateWatermarkImage, initializeEffectsSDK, updateEffect]);
   const onLiveStreamClick = useCallback(() => {
     if (liveStreamStatus === LiveStreamStatus.Ended) {
       setLiveStreamVisible(true);
@@ -625,6 +864,9 @@ const VideoFooter = (props: VideoFooterProps) => {
       }
       mediaStream?.stopShareScreen();
     }
+    if (activeVideoProcessor?.name === 'effects-sdk-processor') {
+      void destroyEffectsSdk(activeVideoProcessor);
+    }
   });
   useMount(() => {
     if (mediaStream) {
@@ -695,7 +937,7 @@ const VideoFooter = (props: VideoFooterProps) => {
         onBlurBackground={onBlurBackground}
         onSelectVideoPlayback={onSelectVideoPlayback}
         activePlaybackUrl={activePlaybackUrl}
-        activeProcessor={activeVideoProcessor?.name}
+        activeProcessor={activeEffectType || activeVideoProcessor?.name}
         cameraList={cameraList}
         activeCamera={activeCamera}
         isMirrored={isVideoMirrored}

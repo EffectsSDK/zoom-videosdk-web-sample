@@ -34,11 +34,24 @@ const videoPlaybacks = [
 ];
 const videoProcessor = [
   {
-    url: `${location.origin}/static/processors/watermark-processor.js`,
+    url: `${location.origin}/processors/watermark-processor.js`,
     type: 'video',
     name: 'watermark-processor',
     options: {}
+  },
+  {
+    url: `${location.origin}/processors/effects-sdk-processor.js`,
+    type: 'video',
+    name: 'effects-sdk-processor',
+    options: {}
   }
+];
+const effectsSdkOptions = [
+  { name: 'Blur', key: 'esdk-blur' },
+  { name: 'Beautification', key: 'esdk-beautification' },
+  { name: 'Background Image', key: 'esdk-image' },
+  { name: 'Background Video', key: 'esdk-video' },
+  { name: 'Lower Third', key: 'esdk-lowerthird' }
 ];
 const CameraButton = (props: CameraButtonProps) => {
   const {
@@ -63,6 +76,8 @@ const CameraButton = (props: CameraButtonProps) => {
   const { mediaStream } = useContext(ZoomMediaContext);
   const onMenuItemClick = (payload: { key: any }) => {
     const processor = videoProcessor.find((item) => item.name === payload.key);
+    const isEffectsSdkOption = payload.key.startsWith('esdk-');
+
     if (payload.key === 'mirror') {
       onMirrorVideo?.();
     } else if (payload.key === 'statistic') {
@@ -71,6 +86,11 @@ const CameraButton = (props: CameraButtonProps) => {
       onBlurBackground?.();
     } else if (/^https:\/\//.test(payload.key)) {
       onSelectVideoPlayback?.(payload.key);
+    } else if (isEffectsSdkOption) {
+      const effectsSdkProcessor = videoProcessor.find((item) => item.name === 'effects-sdk-processor');
+      if (effectsSdkProcessor) {
+        onSelectVideoProcessor?.({ ...effectsSdkProcessor, effectType: payload.key });
+      }
     } else if (processor) {
       onSelectVideoProcessor?.(processor);
     } else {
@@ -109,6 +129,17 @@ const CameraButton = (props: CameraButtonProps) => {
           undefined,
           videoProcessor.map((item) =>
             getAntdItem(item.name, item.name, item.name === activeProcessor && <CheckOutlined />)
+          ),
+          'group'
+        ),
+      !isPreview &&
+        isSupportVideoProcessor &&
+        getAntdItem(
+          'Effects SDK',
+          'effects-sdk',
+          undefined,
+          effectsSdkOptions.map((item) =>
+            getAntdItem(item.name, item.key, item.key === activeProcessor && <CheckOutlined />)
           ),
           'group'
         ),
