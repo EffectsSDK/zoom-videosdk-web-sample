@@ -78,6 +78,50 @@ zmClient.init('en-US', `https://source.zoomgov.com/videosdk/1.11.0/lib`, {
 });
 ```
 
+## Video Effects SDK Integration
+
+This sample demonstrates one possible integration with the [Effects SDK](https://effectssdk.ai/) (`effects-sdk` npm package). It shows how to connect the Effects SDK to the Zoom Video SDK's custom video processor API — the specific effects used here are examples only. The Effects SDK offers a broad range of additional effects and capabilities; see the [Effects SDK documentation](https://effectssdk.ai/docs) for the full list.
+
+### Features
+
+- **Background blur** — soft blur applied to everything behind the subject
+- **Virtual background (image)** — replace the background with a static image
+- **Virtual background (video)** — replace the background with a looping video
+- **Beautification** — smooth skin-tone enhancement
+- **Lower third** — overlay a name/title graphic on the video stream
+
+### Configuration
+
+Replace the placeholder `'CUSTOMER_ID'` in `src/feature/video/components/video-footer.tsx` with your Effects SDK Customer ID:
+
+```ts
+const sdk = new tsvb('YOUR_CUSTOMER_ID');
+```
+
+Request a Customer ID at: https://effectssdk.ai/cp/registration
+
+### How it works
+
+The integration uses the Zoom Video SDK's `VideoProcessor` API together with the browser's `MessageChannel` to pipe frames between the SDK worklet and the Effects SDK:
+
+1. A custom `EffectsSdkProcessor` worklet (`public/processors/effects-sdk-processor.js`) receives raw `VideoFrame` objects from the camera.
+2. Each frame is forwarded over a `MessageChannel` to the main thread, where the Effects SDK processes it.
+3. The processed `VideoFrame` is sent back and drawn onto the output canvas.
+
+### Effect types
+
+The following effects are included as examples. You can replace or extend them with any effect supported by the Effects SDK.
+
+| `effectType`           | Description                        |
+|------------------------|------------------------------------|
+| `esdk-blur`            | Background blur (strength 0.8)     |
+| `esdk-image`           | Static image virtual background    |
+| `esdk-video`           | Video virtual background           |
+| `esdk-beautification`  | Skin-tone beautification           |
+| `esdk-lowerthird`      | Lower-third name/title overlay     |
+
+To add a new effect, extend the `applyEffect` function in `src/feature/video/components/video-footer.tsx` with a new `case` and call the corresponding Effects SDK method on the `sdk` instance.
+
 ## Need help?
 
 If you're looking for help, try [Developer Support](https://devsupport.zoom.us) or our [Developer Forum](https://devforum.zoom.us). Priority support is also available with [Premier Developer Support](https://explore.zoom.us/docs/en-us/developer-support-plans.html) plans.
